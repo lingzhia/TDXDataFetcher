@@ -9,19 +9,23 @@ from tdxapi.models import StockQuote, Bar, Tick
 
 
 def _get_price(data: bytes, pos: int) -> tuple:
-    """pytdx 变长整型编码解析"""
+    """pytdx 变长整型编码解析（含边界检查）"""
+    if pos >= len(data):
+        raise IndexError(f"position {pos} out of range for data length {len(data)}")
     pos_byte = 6
     bdata = data[pos]
     intdata = bdata & 0x3F
     sign = bool(bdata & 0x40)
     if bdata & 0x80:
+        pos += 1
         while True:
-            pos += 1
+            if pos >= len(data):
+                raise IndexError(f"position {pos} out of range for data length {len(data)}")
             bdata = data[pos]
             intdata += (bdata & 0x7F) << pos_byte
             pos_byte += 7
             if bdata & 0x80:
-                pass
+                pos += 1
             else:
                 break
     pos += 1
@@ -80,19 +84,23 @@ def _get_volume(ival: int) -> float:
 
 
 def _get_datetime(category: int, buffer: bytes, pos: int) -> tuple:
-    """pytdx 日期时间解析"""
+    """pytdx 日期时间解析（含边界检查）"""
     year = 0
     month = 0
     day = 0
     hour = 15
     minute = 0
     if category in (9, 5, 6, 10, 11):
+        if pos + 4 > len(buffer):
+            raise IndexError(f"position {pos} out of range for data length {len(buffer)}")
         (date_val,) = struct.unpack_from("<I", buffer, pos)
         year = date_val // 10000
         month = (date_val % 10000) // 100
         day = date_val % 100
         pos += 4
     elif category < 4 or category in (7, 8):
+        if pos + 4 > len(buffer):
+            raise IndexError(f"position {pos} out of range for data length {len(buffer)}")
         (zipday, tminutes) = struct.unpack_from("<HH", buffer, pos)
         year = (zipday >> 11) + 2004
         month = int((zipday % 2048) / 100)
@@ -101,6 +109,8 @@ def _get_datetime(category: int, buffer: bytes, pos: int) -> tuple:
         minute = tminutes % 60
         pos += 4
     else:
+        if pos + 8 > len(buffer):
+            raise IndexError(f"position {pos} out of range for data length {len(buffer)}")
         minutes, hour, minute = struct.unpack_from("<IHH", buffer, pos)
         base = datetime(2000, 1, 1)
         dt = base + timedelta(days=minutes // 1440)
@@ -261,7 +271,10 @@ def parse_quotes(body: bytes) -> list[StockQuote]:
 
 
 def parse_bars(body: bytes, category: int) -> list[Bar]:
-    """解析K线响应包体"""
+    """解析K线响应包体（含边界检查，截断数据只解析有效部分）"""
+    if len(body) < 2:
+        return []
+
     pos = 0
     (ret_count,) = struct.unpack_from("<H", body, pos)
     pos += 2
@@ -270,20 +283,37 @@ def parse_bars(body: bytes, category: int) -> list[Bar]:
     pre_diff_base = 0
 
     for _ in range(ret_count):
-        year, month, day, hour, minute, pos = _get_datetime(category, body, pos)
+        # 边界检查：每个记录至少需要 32 字节（datetime4 + 4*price4 + 2*I4）
+        min_needed = 4 + 16 + 8  # datetime + 4 prices + 2 volumes
+        if pos + min_needed > len(body):
+            break
 
-        price_open_diff, pos = _get_price(body, pos)
-        price_close_diff, pos = _get_price(body, pos)
-        price_high_diff, pos = _get_price(body, pos)
-        price_low_diff, pos = _get_price(body, pos)
+        try:
+            year, month, day, hour, minute, pos = _get_datetime(category, body, pos)
+        except (IndexError, struct.error):
+            break
 
-        (vol_raw,) = struct.unpack_from("<I", body, pos)
-        vol = _get_volume(vol_raw)
-        pos += 4
+        try:
+            price_open_diff, pos = _get_price(body, pos)
+            price_close_diff, pos = _get_price(body, pos)
+            price_high_diff, pos = _get_price(body, pos)
+            price_low_diff, pos = _get_price(body, pos)
+        except (IndexError, struct.error):
+            break
 
-        (dbvol_raw,) = struct.unpack_from("<I", body, pos)
-        dbvol = _get_volume(dbvol_raw)
-        pos += 4
+        try:
+            (vol_raw,) = struct.unpack_from("<I", body, pos)
+            vol = _get_volume(vol_raw)
+            pos += 4
+        except (IndexError, struct.error):
+            break
+
+        try:
+            (dbvol_raw,) = struct.unpack_from("<I", body, pos)
+            dbvol = _get_volume(dbvol_raw)
+            pos += 4
+        except (IndexError, struct.error):
+            break
 
         open_diff_total = price_open_diff + pre_diff_base
         close = (open_diff_total + price_close_diff) / 1000.0
