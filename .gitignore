@@ -42,3 +42,6 @@ test_connect.py
 # Local config
 .env
 *.local
+
+# Codegraph local index
+.codegraph/
