@@ -1,0 +1,8 @@
+# CodeGraph local transient files
+cache/
+*.log
+.dirty
+daemon.pid
+daemon.sock
+*.db-shm
+
