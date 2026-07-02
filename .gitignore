@@ -43,5 +43,3 @@ test_connect.py
 .env
 *.local
 
-# Codegraph local index
-.codegraph/
